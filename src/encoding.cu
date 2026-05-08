@@ -29,6 +29,7 @@
 
 #include <tiny-cuda-nn/encoding.h>
 
+#include <tiny-cuda-nn/encodings/adaptive_hashgrid.h>
 #include <tiny-cuda-nn/encodings/composite.h>
 #include <tiny-cuda-nn/encodings/empty.h>
 #include <tiny-cuda-nn/encodings/frequency.h>
@@ -73,6 +74,9 @@ auto register_builtin_encodings() {
 	register_encoding<T>(factories, "HashGrid", grid_factory);
 	register_encoding<T>(factories, "TiledGrid", grid_factory);
 	register_encoding<T>(factories, "DenseGrid", grid_factory);
+	register_encoding<T>(factories, "AdaptiveHashGrid", [](uint32_t n_dims_to_encode, const json& encoding) {
+		return create_adaptive_hashgrid_encoding<T>(n_dims_to_encode, encoding);
+	});
 
 	register_encoding<T>(factories, "Identity", [](uint32_t n_dims_to_encode, const json& encoding) {
 		return new IdentityEncoding<T>{n_dims_to_encode, encoding.value("scale", 1.0f), encoding.value("offset", 0.0f)};
