@@ -60,11 +60,15 @@ public:
 	virtual bool two_choice_hashgrid() const = 0;
 	virtual std::vector<uint32_t> two_choice_salts() const = 0;
 	virtual std::vector<uint32_t> two_choice_loads() const = 0;
+	virtual std::vector<uint8_t> two_choice_route_bits() const = 0;
 	virtual const uint32_t* two_choice_salts_gpu() const = 0;
 	virtual const uint32_t* two_choice_loads_gpu() const = 0;
+	virtual const uint8_t* two_choice_route_bits_gpu() const = 0;
 	virtual uint32_t two_choice_load_table_stride() const = 0;
+	virtual uint32_t two_choice_route_bit_resolution() const = 0;
 	virtual void set_two_choice_salts(const std::vector<uint32_t>& salts) = 0;
 	virtual void set_two_choice_loads(const std::vector<uint32_t>& loads) = 0;
+	virtual void set_two_choice_route_bits(const std::vector<uint8_t>& route_bits, uint32_t resolution) = 0;
 };
 
 template <typename T, uint32_t N_POS_DIMS, uint32_t N_FEATURES_PER_LEVEL, HashType HASH_TYPE>
@@ -82,6 +86,8 @@ __global__ void kernel_grid(
 	const uint32_t* __restrict__ two_choice_salts,
 	const uint32_t* __restrict__ two_choice_loads,
 	const uint32_t two_choice_load_table_stride,
+	const uint8_t* __restrict__ two_choice_route_bits,
+	const uint32_t two_choice_route_bit_resolution,
 	const uint32_t n_levels,
 	const T* __restrict__ grid,
 	MatrixView<const float> positions_in,
@@ -143,7 +149,7 @@ __global__ void kernel_grid(
 
 	auto grid_val = [&](const uvec<N_POS_DIMS>& local_pos) {
 		const uint32_t index = two_choice_salts ?
-			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL :
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads, two_choice_route_bits, two_choice_route_bit_resolution) * N_FEATURES_PER_LEVEL :
 			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL;
 		return *(tvec<T, N_FEATURES_PER_LEVEL, PARAMS_ALIGNED ? sizeof(T) * N_FEATURES_PER_LEVEL : sizeof(T)>*)&grid[index];
 	};
@@ -257,6 +263,8 @@ __global__ void kernel_grid_backward(
 	const uint32_t* __restrict__ two_choice_salts,
 	const uint32_t* __restrict__ two_choice_loads,
 	const uint32_t two_choice_load_table_stride,
+	const uint8_t* __restrict__ two_choice_route_bits,
+	const uint32_t two_choice_route_bit_resolution,
 	const uint32_t n_levels,
 	GRAD_T* __restrict__ grid_gradient,
 	MatrixView<const float> positions_in,
@@ -287,7 +295,7 @@ __global__ void kernel_grid_backward(
 
 	auto add_grid_gradient = [&](const uvec<N_POS_DIMS>& local_pos, const tvec<GRAD_T, N_FEATURES_PER_THREAD>& grad, const float weight) {
 		uint32_t index = two_choice_salts ?
-			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL + feature :
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads, two_choice_route_bits, two_choice_route_bit_resolution) * N_FEATURES_PER_LEVEL + feature :
 			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		atomic_add_gmem(grid_gradient + index, (GRAD_T)weight * grad);
 	};
@@ -402,6 +410,8 @@ __global__ void kernel_grid_backward_input_backward_grid(
 	const uint32_t* __restrict__ two_choice_salts,
 	const uint32_t* __restrict__ two_choice_loads,
 	const uint32_t two_choice_load_table_stride,
+	const uint8_t* __restrict__ two_choice_route_bits,
+	const uint32_t two_choice_route_bit_resolution,
 	const uint32_t n_levels,
 	// inputs
 	MatrixView<const float> dL_ddLdx,
@@ -435,7 +445,7 @@ __global__ void kernel_grid_backward_input_backward_grid(
 
 	auto add_grid_gradient = [&](const uvec<N_POS_DIMS>& local_pos, const tvec<GRAD_T, N_FEATURES_PER_THREAD>& grad, const float weight) {
 		const uint32_t index = two_choice_salts ?
-			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL + feature :
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads, two_choice_route_bits, two_choice_route_bit_resolution) * N_FEATURES_PER_LEVEL + feature :
 			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		atomic_add_gmem(grid_gradient + index, (GRAD_T)weight * grad);
 	};
@@ -515,6 +525,8 @@ __global__ void kernel_grid_backward_input_backward_input(
 	const uint32_t* __restrict__ two_choice_salts,
 	const uint32_t* __restrict__ two_choice_loads,
 	const uint32_t two_choice_load_table_stride,
+	const uint8_t* __restrict__ two_choice_route_bits,
+	const uint32_t two_choice_route_bit_resolution,
 	const uint32_t n_levels,
 	// inputs
 	MatrixView<const float> dL_ddLdx,
@@ -580,7 +592,7 @@ __global__ void kernel_grid_backward_input_backward_input(
 
 	auto calc_dLdx = [&](const uvec<N_POS_DIMS>& local_pos, const float weight) {
 		const uint32_t index = two_choice_salts ?
-			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL + feature :
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads, two_choice_route_bits, two_choice_route_bit_resolution) * N_FEATURES_PER_LEVEL + feature :
 			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		float dL_dx_dim = 0;
 
@@ -737,7 +749,9 @@ public:
 		const std::vector<uint32_t>& level_salts = {},
 		bool two_choice_hashgrid = false,
 		const std::vector<uint32_t>& two_choice_salts = {},
-		const std::vector<uint32_t>& two_choice_loads = {}
+		const std::vector<uint32_t>& two_choice_loads = {},
+		uint32_t two_choice_route_bit_resolution = 0,
+		const std::vector<uint8_t>& two_choice_route_bits = {}
 	) :
 	m_n_features{n_features},
 	m_log2_hashmap_size{log2_hashmap_size},
@@ -813,6 +827,9 @@ public:
 			std::vector<uint32_t> initial_loads = two_choice_loads.empty() ? std::vector<uint32_t>((size_t)2 * m_n_levels * m_two_choice_load_table_stride, 0u) : two_choice_loads;
 			set_two_choice_salts(initial_salts);
 			set_two_choice_loads(initial_loads);
+			if (two_choice_route_bit_resolution || !two_choice_route_bits.empty()) {
+				set_two_choice_route_bits(two_choice_route_bits, two_choice_route_bit_resolution);
+			}
 		}
 	}
 
@@ -878,6 +895,8 @@ public:
 			m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
 			m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
 			m_two_choice_load_table_stride,
+			m_two_choice_hashgrid ? two_choice_route_bits_gpu() : nullptr,
+			m_two_choice_hashgrid ? m_two_choice_route_bit_resolution : 0u,
 			m_n_levels,
 			use_inference_params ? this->inference_params() : this->params(),
 			forward->positions.data() ? forward->positions.view() : input.view(),
@@ -971,6 +990,8 @@ public:
 				m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
 				m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
 				m_two_choice_load_table_stride,
+				m_two_choice_hashgrid ? two_choice_route_bits_gpu() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_route_bit_resolution : 0u,
 				m_n_levels,
 				grid_gradient,
 				forward.positions.data() ? forward.positions.view() : input.view(), // positions SoA
@@ -1070,6 +1091,8 @@ public:
 				m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
 				m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
 				m_two_choice_load_table_stride,
+				m_two_choice_hashgrid ? two_choice_route_bits_gpu() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_route_bit_resolution : 0u,
 				m_n_levels,
 				// inputs
 				dL_ddLdinput.view(),
@@ -1129,6 +1152,8 @@ public:
 				m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
 				m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
 				m_two_choice_load_table_stride,
+				m_two_choice_hashgrid ? two_choice_route_bits_gpu() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_route_bit_resolution : 0u,
 				m_n_levels,
 				// inputs
 				dL_ddLdinput.view(),
@@ -1248,6 +1273,10 @@ public:
 		return m_two_choice_loads;
 	}
 
+	std::vector<uint8_t> two_choice_route_bits() const override {
+		return m_two_choice_route_bits;
+	}
+
 	const uint32_t* two_choice_salts_gpu() const override {
 		return m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr;
 	}
@@ -1256,8 +1285,16 @@ public:
 		return m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr;
 	}
 
+	const uint8_t* two_choice_route_bits_gpu() const override {
+		return m_two_choice_hashgrid && m_two_choice_route_bit_resolution ? m_two_choice_route_bits_gpu.data() : nullptr;
+	}
+
 	uint32_t two_choice_load_table_stride() const override {
 		return m_two_choice_load_table_stride;
+	}
+
+	uint32_t two_choice_route_bit_resolution() const override {
+		return m_two_choice_route_bit_resolution;
 	}
 
 	void set_two_choice_salts(const std::vector<uint32_t>& salts) override {
@@ -1285,6 +1322,30 @@ public:
 		m_two_choice_loads_gpu.resize_and_copy_from_host(m_two_choice_loads);
 	}
 
+	void set_two_choice_route_bits(const std::vector<uint8_t>& route_bits, uint32_t resolution) override {
+		if (!m_two_choice_hashgrid) {
+			throw std::runtime_error{"GridEncoding: route bits can only be set on TwoChoiceHashGrid."};
+		}
+		if (resolution == 0) {
+			if (!route_bits.empty()) {
+				throw std::runtime_error{"TwoChoiceHashGrid: route bit resolution must be nonzero when route bits are provided."};
+			}
+			m_two_choice_route_bit_resolution = 0;
+			m_two_choice_route_bits.clear();
+			m_two_choice_route_bits_gpu.resize(0);
+			return;
+		}
+
+		const size_t expected = (size_t)m_n_levels * resolution * resolution * resolution;
+		if (route_bits.size() != expected) {
+			throw std::runtime_error{fmt::format("TwoChoiceHashGrid: expected {} route-bit entries for resolution {}, got {}.", expected, resolution, route_bits.size())};
+		}
+
+		m_two_choice_route_bit_resolution = resolution;
+		m_two_choice_route_bits = route_bits;
+		m_two_choice_route_bits_gpu.resize_and_copy_from_host(m_two_choice_route_bits);
+	}
+
 	json hyperparams() const override {
 		json result = {
 			{"otype", m_two_choice_hashgrid ? "TwoChoiceHashGrid" : (m_routed_hashgrid ? "RoutedHashGrid" : "Grid")},
@@ -1306,6 +1367,10 @@ public:
 		if (m_two_choice_hashgrid) {
 			result["two_choice_salts"] = m_two_choice_salts;
 			result["two_choice_load_table_stride"] = m_two_choice_load_table_stride;
+			if (m_two_choice_route_bit_resolution) {
+				result["two_choice_route_bit_resolution"] = m_two_choice_route_bit_resolution;
+				result["two_choice_route_bits"] = m_two_choice_route_bits;
+			}
 		}
 
 		return result;
@@ -1914,10 +1979,13 @@ private:
 	GPUMemory<uint32_t> m_level_salts_gpu;
 	bool m_two_choice_hashgrid = false;
 	uint32_t m_two_choice_load_table_stride = 0;
+	uint32_t m_two_choice_route_bit_resolution = 0;
 	std::vector<uint32_t> m_two_choice_salts;
 	std::vector<uint32_t> m_two_choice_loads;
+	std::vector<uint8_t> m_two_choice_route_bits;
 	GPUMemory<uint32_t> m_two_choice_salts_gpu;
 	GPUMemory<uint32_t> m_two_choice_loads_gpu;
+	GPUMemory<uint8_t> m_two_choice_route_bits_gpu;
 };
 
 template <typename T, uint32_t N_FEATURES_PER_LEVEL, HashType HASH_TYPE>
@@ -1958,6 +2026,8 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 		throw std::runtime_error{fmt::format("TwoChoiceHashGrid: expected {} salts, got {}.", 2 * n_levels, two_choice_salts.size())};
 	}
 	std::vector<uint32_t> two_choice_loads = encoding.value("two_choice_loads", std::vector<uint32_t>{});
+	const uint32_t two_choice_route_bit_resolution = encoding.value("two_choice_route_bit_resolution", 0u);
+	std::vector<uint8_t> two_choice_route_bits = encoding.value("two_choice_route_bits", std::vector<uint8_t>{});
 
 #define TCNN_GRID_PARAMS \
 	n_features, \
@@ -1972,7 +2042,9 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	level_salts, \
 	two_choice_hashgrid, \
 	two_choice_salts, \
-	two_choice_loads,
+	two_choice_loads, \
+	two_choice_route_bit_resolution, \
+	two_choice_route_bits,
 
 	// If higher-dimensional hash encodings are desired, corresponding switch cases can be added
 	switch (n_dims_to_encode) {
@@ -2017,6 +2089,8 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	std::vector<uint32_t> level_salts = encoding.value("level_salts", std::vector<uint32_t>(n_levels, 0u));
 	std::vector<uint32_t> two_choice_salts = encoding.value("two_choice_salts", std::vector<uint32_t>(2 * n_levels, 0u));
 	std::vector<uint32_t> two_choice_loads = encoding.value("two_choice_loads", std::vector<uint32_t>{});
+	const uint32_t two_choice_route_bit_resolution = encoding.value("two_choice_route_bit_resolution", 0u);
+	std::vector<uint8_t> two_choice_route_bits = encoding.value("two_choice_route_bits", std::vector<uint8_t>{});
 
 #define TCNN_GRID_PARAMS \
 	n_features, \
@@ -2031,7 +2105,9 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	level_salts, \
 	two_choice_hashgrid, \
 	two_choice_salts, \
-	two_choice_loads,
+	two_choice_loads, \
+	two_choice_route_bit_resolution, \
+	two_choice_route_bits,
 
 	// If higher-dimensional hash encodings are desired, corresponding switch cases can be added
 	switch (n_dims_to_encode) {

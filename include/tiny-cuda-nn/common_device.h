@@ -950,9 +950,11 @@ __device__ uint32_t two_choice_grid_index(
 	const uint32_t n_levels,
 	const uint32_t load_table_stride,
 	const uint32_t* __restrict__ two_choice_salts,
-	const uint32_t* __restrict__ two_choice_loads
+	const uint32_t* __restrict__ two_choice_loads,
+	const uint8_t* __restrict__ two_choice_route_bits = nullptr,
+	const uint32_t route_bit_resolution = 0
 ) {
-	if (!two_choice_salts || !two_choice_loads || load_table_stride == 0 || grid_type != GridType::Hash) {
+	if (!two_choice_salts || grid_type != GridType::Hash) {
 		return grid_index<N_DIMS, HASH_TYPE>(grid_type, hashmap_size, grid_resolution, pos_grid);
 	}
 
@@ -993,6 +995,24 @@ __device__ uint32_t two_choice_grid_index(
 	const uint32_t salt_b = two_choice_salts[n_levels + level];
 	const uint32_t slot_a = (salt_a == 0 ? base_hash : mix_hash_salt(base_hash, salt_a)) % hashmap_size;
 	const uint32_t slot_b = (salt_b == 0 ? base_hash : mix_hash_salt(base_hash, salt_b)) % hashmap_size;
+	if (two_choice_route_bits && route_bit_resolution > 0) {
+		const uint32_t br = route_bit_resolution;
+		const uint32_t denom = grid_resolution + 1;
+		uint32_t bucket_index = level * br * br * br;
+		uint32_t bucket_stride = 1;
+		TCNN_PRAGMA_UNROLL
+		for (uint32_t dim = 0; dim < N_DIMS; ++dim) {
+			const uint32_t bucket_dim = min((uint32_t)(((uint64_t)pos_grid[dim] * br) / denom), br - 1);
+			bucket_index += bucket_dim * bucket_stride;
+			bucket_stride *= br;
+		}
+		return two_choice_route_bits[bucket_index] ? slot_b : slot_a;
+	}
+
+	if (!two_choice_loads || load_table_stride == 0) {
+		return grid_index<N_DIMS, HASH_TYPE>(grid_type, hashmap_size, grid_resolution, pos_grid);
+	}
+
 	const uint32_t* loads_a = two_choice_loads + (uint64_t)level * load_table_stride;
 	const uint32_t* loads_b = two_choice_loads + (uint64_t)(n_levels + level) * load_table_stride;
 	return loads_a[slot_a] <= loads_b[slot_b] ? slot_a : slot_b;
