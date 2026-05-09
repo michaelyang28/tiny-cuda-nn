@@ -940,6 +940,64 @@ __device__ uint32_t routed_grid_index(
 	return index % hashmap_size;
 }
 
+template <uint32_t N_DIMS, HashType HASH_TYPE>
+__device__ uint32_t two_choice_grid_index(
+	const GridType grid_type,
+	const uint32_t hashmap_size,
+	const uint32_t grid_resolution,
+	const uvec<N_DIMS>& pos_grid,
+	const uint32_t level,
+	const uint32_t n_levels,
+	const uint32_t load_table_stride,
+	const uint32_t* __restrict__ two_choice_salts,
+	const uint32_t* __restrict__ two_choice_loads
+) {
+	if (!two_choice_salts || !two_choice_loads || load_table_stride == 0 || grid_type != GridType::Hash) {
+		return grid_index<N_DIMS, HASH_TYPE>(grid_type, hashmap_size, grid_resolution, pos_grid);
+	}
+
+	uint32_t stride = 1;
+	uint32_t index = 0;
+
+	constexpr uint32_t MAX_BASES[] = {
+		0x0,
+		0xFFFFFFFF,
+		0xFFFF,
+		0x659,
+		0xFF,
+		0x54,
+		0x28,
+		0x17,
+		0xF,
+		0xB,
+		0x9,
+	};
+	static_assert(N_DIMS <= sizeof(MAX_BASES), "two_choice_grid_index can only be used for N_DIMS <= 10");
+
+	if (grid_resolution <= MAX_BASES[N_DIMS]) {
+		TCNN_PRAGMA_UNROLL
+		for (uint32_t dim = 0; dim < N_DIMS; ++dim) {
+			index += pos_grid[dim] * stride;
+			stride *= grid_resolution;
+		}
+	} else {
+		stride = 0xFFFFFFFF;
+	}
+
+	if (hashmap_size >= stride) {
+		return index % hashmap_size;
+	}
+
+	const uint32_t base_hash = grid_hash<N_DIMS, HASH_TYPE>(pos_grid);
+	const uint32_t salt_a = two_choice_salts[level];
+	const uint32_t salt_b = two_choice_salts[n_levels + level];
+	const uint32_t slot_a = (salt_a == 0 ? base_hash : mix_hash_salt(base_hash, salt_a)) % hashmap_size;
+	const uint32_t slot_b = (salt_b == 0 ? base_hash : mix_hash_salt(base_hash, salt_b)) % hashmap_size;
+	const uint32_t* loads_a = two_choice_loads + (uint64_t)level * load_table_stride;
+	const uint32_t* loads_b = two_choice_loads + (uint64_t)(n_levels + level) * load_table_stride;
+	return loads_a[slot_a] <= loads_b[slot_b] ? slot_a : slot_b;
+}
+
 __host__ __device__ inline float grid_scale(uint32_t level, float log2_per_level_scale, uint32_t base_resolution) {
 	// The -1 means that `base_resolution` refers to the number of grid _vertices_ rather
 	// than the number of cells. This is slightly different from the notation in the paper,

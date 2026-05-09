@@ -54,6 +54,19 @@ public:
 	virtual void set_routed_level_salts(const std::vector<uint32_t>& salts) = 0;
 };
 
+class TwoChoiceHashGridEncodingBase {
+public:
+	virtual ~TwoChoiceHashGridEncodingBase() = default;
+	virtual bool two_choice_hashgrid() const = 0;
+	virtual std::vector<uint32_t> two_choice_salts() const = 0;
+	virtual std::vector<uint32_t> two_choice_loads() const = 0;
+	virtual const uint32_t* two_choice_salts_gpu() const = 0;
+	virtual const uint32_t* two_choice_loads_gpu() const = 0;
+	virtual uint32_t two_choice_load_table_stride() const = 0;
+	virtual void set_two_choice_salts(const std::vector<uint32_t>& salts) = 0;
+	virtual void set_two_choice_loads(const std::vector<uint32_t>& loads) = 0;
+};
+
 template <typename T, uint32_t N_POS_DIMS, uint32_t N_FEATURES_PER_LEVEL, HashType HASH_TYPE>
 __global__ void kernel_grid(
 	const uint32_t num_elements,
@@ -66,6 +79,10 @@ __global__ void kernel_grid(
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
 	const uint32_t* __restrict__ level_salts,
+	const uint32_t* __restrict__ two_choice_salts,
+	const uint32_t* __restrict__ two_choice_loads,
+	const uint32_t two_choice_load_table_stride,
+	const uint32_t n_levels,
 	const T* __restrict__ grid,
 	MatrixView<const float> positions_in,
 	T* __restrict__ encoded_positions,
@@ -125,7 +142,9 @@ __global__ void kernel_grid(
 	}
 
 	auto grid_val = [&](const uvec<N_POS_DIMS>& local_pos) {
-		const uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL;
+		const uint32_t index = two_choice_salts ?
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL :
+			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL;
 		return *(tvec<T, N_FEATURES_PER_LEVEL, PARAMS_ALIGNED ? sizeof(T) * N_FEATURES_PER_LEVEL : sizeof(T)>*)&grid[index];
 	};
 
@@ -235,6 +254,10 @@ __global__ void kernel_grid_backward(
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
 	const uint32_t* __restrict__ level_salts,
+	const uint32_t* __restrict__ two_choice_salts,
+	const uint32_t* __restrict__ two_choice_loads,
+	const uint32_t two_choice_load_table_stride,
+	const uint32_t n_levels,
 	GRAD_T* __restrict__ grid_gradient,
 	MatrixView<const float> positions_in,
 	const T* __restrict__ dL_dy
@@ -263,7 +286,9 @@ __global__ void kernel_grid_backward(
 	const uint32_t resolution = grid_resolution(scale);
 
 	auto add_grid_gradient = [&](const uvec<N_POS_DIMS>& local_pos, const tvec<GRAD_T, N_FEATURES_PER_THREAD>& grad, const float weight) {
-		uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
+		uint32_t index = two_choice_salts ?
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL + feature :
+			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		atomic_add_gmem(grid_gradient + index, (GRAD_T)weight * grad);
 	};
 
@@ -374,6 +399,10 @@ __global__ void kernel_grid_backward_input_backward_grid(
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
 	const uint32_t* __restrict__ level_salts,
+	const uint32_t* __restrict__ two_choice_salts,
+	const uint32_t* __restrict__ two_choice_loads,
+	const uint32_t two_choice_load_table_stride,
+	const uint32_t n_levels,
 	// inputs
 	MatrixView<const float> dL_ddLdx,
 	MatrixView<const float> positions_in,
@@ -405,7 +434,9 @@ __global__ void kernel_grid_backward_input_backward_grid(
 	const uint32_t resolution = grid_resolution(scale);
 
 	auto add_grid_gradient = [&](const uvec<N_POS_DIMS>& local_pos, const tvec<GRAD_T, N_FEATURES_PER_THREAD>& grad, const float weight) {
-		const uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
+		const uint32_t index = two_choice_salts ?
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL + feature :
+			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		atomic_add_gmem(grid_gradient + index, (GRAD_T)weight * grad);
 	};
 
@@ -481,6 +512,10 @@ __global__ void kernel_grid_backward_input_backward_input(
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
 	const uint32_t* __restrict__ level_salts,
+	const uint32_t* __restrict__ two_choice_salts,
+	const uint32_t* __restrict__ two_choice_loads,
+	const uint32_t two_choice_load_table_stride,
+	const uint32_t n_levels,
 	// inputs
 	MatrixView<const float> dL_ddLdx,
 	MatrixView<const float> positions_in,
@@ -544,7 +579,9 @@ __global__ void kernel_grid_backward_input_backward_input(
 	// for N-linear interpolation
 
 	auto calc_dLdx = [&](const uvec<N_POS_DIMS>& local_pos, const float weight) {
-		const uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
+		const uint32_t index = two_choice_salts ?
+			two_choice_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level, n_levels, two_choice_load_table_stride, two_choice_salts, two_choice_loads) * N_FEATURES_PER_LEVEL + feature :
+			routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		float dL_dx_dim = 0;
 
 		TCNN_PRAGMA_UNROLL
@@ -672,7 +709,7 @@ __global__ void kernel_grid_backward_input_backward_dLdoutput(
 }
 
 template <typename T, uint32_t N_POS_DIMS=3, uint32_t N_FEATURES_PER_LEVEL=2, HashType HASH_TYPE=HashType::CoherentPrime>
-class GridEncodingTemplated : public MultiLevelEncoding<T>, public RoutedHashGridEncodingBase {
+class GridEncodingTemplated : public MultiLevelEncoding<T>, public RoutedHashGridEncodingBase, public TwoChoiceHashGridEncodingBase {
 public:
 #if TCNN_MIN_GPU_ARCH >= 62 || TCNN_MIN_GPU_ARCH == 60
 	// The GPUs that we tested this on do not have an efficient 1D fp16
@@ -697,7 +734,10 @@ public:
 		GridType grid_type,
 		bool fixed_point_pos,
 		bool routed_hashgrid = false,
-		const std::vector<uint32_t>& level_salts = {}
+		const std::vector<uint32_t>& level_salts = {},
+		bool two_choice_hashgrid = false,
+		const std::vector<uint32_t>& two_choice_salts = {},
+		const std::vector<uint32_t>& two_choice_loads = {}
 	) :
 	m_n_features{n_features},
 	m_log2_hashmap_size{log2_hashmap_size},
@@ -707,10 +747,14 @@ public:
 	m_interpolation_type{interpolation_type},
 	m_grid_type{grid_type},
 	m_fixed_point_pos{fixed_point_pos},
-	m_routed_hashgrid{routed_hashgrid}
+	m_routed_hashgrid{routed_hashgrid},
+	m_two_choice_hashgrid{two_choice_hashgrid}
 	{
 		if (m_routed_hashgrid && grid_type != GridType::Hash) {
 			throw std::runtime_error{"RoutedHashGrid: only Hash grid type is supported."};
+		}
+		if (m_two_choice_hashgrid && grid_type != GridType::Hash) {
+			throw std::runtime_error{"TwoChoiceHashGrid: only Hash grid type is supported."};
 		}
 
 		m_n_levels = div_round_up(m_n_features, N_FEATURES_PER_LEVEL);
@@ -762,6 +806,13 @@ public:
 		if (m_routed_hashgrid) {
 			std::vector<uint32_t> initial_salts = level_salts.empty() ? std::vector<uint32_t>(m_n_levels, 0u) : level_salts;
 			set_routed_level_salts(initial_salts);
+		}
+		if (m_two_choice_hashgrid) {
+			m_two_choice_load_table_stride = 1u << m_log2_hashmap_size;
+			std::vector<uint32_t> initial_salts = two_choice_salts.empty() ? std::vector<uint32_t>(2 * m_n_levels, 0u) : two_choice_salts;
+			std::vector<uint32_t> initial_loads = two_choice_loads.empty() ? std::vector<uint32_t>((size_t)2 * m_n_levels * m_two_choice_load_table_stride, 0u) : two_choice_loads;
+			set_two_choice_salts(initial_salts);
+			set_two_choice_loads(initial_loads);
 		}
 	}
 
@@ -824,6 +875,10 @@ public:
 			m_interpolation_type,
 			m_grid_type,
 			m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
+			m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
+			m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
+			m_two_choice_load_table_stride,
+			m_n_levels,
 			use_inference_params ? this->inference_params() : this->params(),
 			forward->positions.data() ? forward->positions.view() : input.view(),
 			encoded_positions_soa,
@@ -913,6 +968,10 @@ public:
 				m_interpolation_type,
 				m_grid_type,
 				m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
+				m_two_choice_load_table_stride,
+				m_n_levels,
 				grid_gradient,
 				forward.positions.data() ? forward.positions.view() : input.view(), // positions SoA
 				dL_dy_rm // gradients SoA
@@ -1008,6 +1067,10 @@ public:
 				m_interpolation_type,
 				m_grid_type,
 				m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
+				m_two_choice_load_table_stride,
+				m_n_levels,
 				// inputs
 				dL_ddLdinput.view(),
 				forward.positions.data() ? forward.positions.view() : input.view(), // positions SoA
@@ -1063,6 +1126,10 @@ public:
 				m_interpolation_type,
 				m_grid_type,
 				m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr,
+				m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr,
+				m_two_choice_load_table_stride,
+				m_n_levels,
 				// inputs
 				dL_ddLdinput.view(),
 				forward.positions.data() ? forward.positions.view() : input.view(),
@@ -1169,9 +1236,58 @@ public:
 		m_level_salts_gpu.resize_and_copy_from_host(m_level_salts);
 	}
 
+	bool two_choice_hashgrid() const override {
+		return m_two_choice_hashgrid;
+	}
+
+	std::vector<uint32_t> two_choice_salts() const override {
+		return m_two_choice_salts;
+	}
+
+	std::vector<uint32_t> two_choice_loads() const override {
+		return m_two_choice_loads;
+	}
+
+	const uint32_t* two_choice_salts_gpu() const override {
+		return m_two_choice_hashgrid ? m_two_choice_salts_gpu.data() : nullptr;
+	}
+
+	const uint32_t* two_choice_loads_gpu() const override {
+		return m_two_choice_hashgrid ? m_two_choice_loads_gpu.data() : nullptr;
+	}
+
+	uint32_t two_choice_load_table_stride() const override {
+		return m_two_choice_load_table_stride;
+	}
+
+	void set_two_choice_salts(const std::vector<uint32_t>& salts) override {
+		if (!m_two_choice_hashgrid) {
+			throw std::runtime_error{"GridEncoding: two-choice salts can only be set on TwoChoiceHashGrid."};
+		}
+		if (salts.size() != 2 * m_n_levels) {
+			throw std::runtime_error{fmt::format("TwoChoiceHashGrid: expected {} salts, got {}.", 2 * m_n_levels, salts.size())};
+		}
+
+		m_two_choice_salts = salts;
+		m_two_choice_salts_gpu.resize_and_copy_from_host(m_two_choice_salts);
+	}
+
+	void set_two_choice_loads(const std::vector<uint32_t>& loads) override {
+		if (!m_two_choice_hashgrid) {
+			throw std::runtime_error{"GridEncoding: two-choice loads can only be set on TwoChoiceHashGrid."};
+		}
+		const size_t expected = (size_t)2 * m_n_levels * m_two_choice_load_table_stride;
+		if (loads.size() != expected) {
+			throw std::runtime_error{fmt::format("TwoChoiceHashGrid: expected {} load entries, got {}.", expected, loads.size())};
+		}
+
+		m_two_choice_loads = loads;
+		m_two_choice_loads_gpu.resize_and_copy_from_host(m_two_choice_loads);
+	}
+
 	json hyperparams() const override {
 		json result = {
-			{"otype", m_routed_hashgrid ? "RoutedHashGrid" : "Grid"},
+			{"otype", m_two_choice_hashgrid ? "TwoChoiceHashGrid" : (m_routed_hashgrid ? "RoutedHashGrid" : "Grid")},
 			{"type", to_string(m_grid_type)},
 			{"n_levels", m_n_levels},
 			{"n_features_per_level", N_FEATURES_PER_LEVEL},
@@ -1186,6 +1302,10 @@ public:
 		}
 		if (m_routed_hashgrid) {
 			result["level_salts"] = m_level_salts;
+		}
+		if (m_two_choice_hashgrid) {
+			result["two_choice_salts"] = m_two_choice_salts;
+			result["two_choice_load_table_stride"] = m_two_choice_load_table_stride;
 		}
 
 		return result;
@@ -1646,6 +1766,9 @@ public:
 	}
 
 	std::string generate_device_function(const std::string& name) const override {
+		if (m_two_choice_hashgrid) {
+			throw std::runtime_error{"TwoChoiceHashGrid: JIT device-function generation is not supported yet; disable JIT fusion."};
+		}
 		std::string lookup_fun_name = fmt::format("{}_lookup", name);
 
 		std::ostringstream body;
@@ -1679,6 +1802,9 @@ public:
 	}
 
 	std::string generate_backward_device_function(const std::string& name, uint32_t n_threads) const override {
+		if (m_two_choice_hashgrid) {
+			throw std::runtime_error{"TwoChoiceHashGrid: JIT backward generation is not supported yet; disable JIT fusion."};
+		}
 		std::string lookup_fun_name = fmt::format("{}_lookup", name);
 
 		std::ostringstream body;
@@ -1708,6 +1834,9 @@ public:
 	}
 
 	std::string generate_backward_backward_input_device_function(const std::string& name, uint32_t n_threads) const override {
+		if (m_two_choice_hashgrid) {
+			throw std::runtime_error{"TwoChoiceHashGrid: JIT second-order generation is not supported yet; disable JIT fusion."};
+		}
 		std::string lookup_fun_name = fmt::format("{}_lookup", name);
 
 		std::ostringstream body;
@@ -1783,6 +1912,12 @@ private:
 	bool m_routed_hashgrid = false;
 	std::vector<uint32_t> m_level_salts;
 	GPUMemory<uint32_t> m_level_salts_gpu;
+	bool m_two_choice_hashgrid = false;
+	uint32_t m_two_choice_load_table_stride = 0;
+	std::vector<uint32_t> m_two_choice_salts;
+	std::vector<uint32_t> m_two_choice_loads;
+	GPUMemory<uint32_t> m_two_choice_salts_gpu;
+	GPUMemory<uint32_t> m_two_choice_loads_gpu;
 };
 
 template <typename T, uint32_t N_FEATURES_PER_LEVEL, HashType HASH_TYPE>
@@ -1807,13 +1942,22 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	const uint32_t base_resolution = encoding.value("base_resolution", 16u);
 	const bool fixed_point_pos = encoding.value("fixed_point_pos", false);
 	const bool routed_hashgrid = equals_case_insensitive(encoding_type, "RoutedHashGrid");
+	const bool two_choice_hashgrid = equals_case_insensitive(encoding_type, "TwoChoiceHashGrid");
 	if (routed_hashgrid && grid_type != GridType::Hash) {
 		throw std::runtime_error{"RoutedHashGrid: only Hash grid type is supported."};
+	}
+	if (two_choice_hashgrid && grid_type != GridType::Hash) {
+		throw std::runtime_error{"TwoChoiceHashGrid: only Hash grid type is supported."};
 	}
 	std::vector<uint32_t> level_salts = encoding.value("level_salts", std::vector<uint32_t>(n_levels, 0u));
 	if (routed_hashgrid && level_salts.size() != n_levels) {
 		throw std::runtime_error{fmt::format("RoutedHashGrid: expected {} level salts, got {}.", n_levels, level_salts.size())};
 	}
+	std::vector<uint32_t> two_choice_salts = encoding.value("two_choice_salts", std::vector<uint32_t>(2 * n_levels, 0u));
+	if (two_choice_hashgrid && two_choice_salts.size() != 2 * n_levels) {
+		throw std::runtime_error{fmt::format("TwoChoiceHashGrid: expected {} salts, got {}.", 2 * n_levels, two_choice_salts.size())};
+	}
+	std::vector<uint32_t> two_choice_loads = encoding.value("two_choice_loads", std::vector<uint32_t>{});
 
 #define TCNN_GRID_PARAMS \
 	n_features, \
@@ -1825,7 +1969,10 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	grid_type, \
 	fixed_point_pos, \
 	routed_hashgrid, \
-	level_salts,
+	level_salts, \
+	two_choice_hashgrid, \
+	two_choice_salts, \
+	two_choice_loads,
 
 	// If higher-dimensional hash encodings are desired, corresponding switch cases can be added
 	switch (n_dims_to_encode) {
@@ -1863,10 +2010,13 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	const uint32_t base_resolution = encoding.value("base_resolution", 16u);
 	const bool fixed_point_pos = encoding.value("fixed_point_pos", false);
 	const bool routed_hashgrid = equals_case_insensitive(encoding_type, "RoutedHashGrid");
-	if (routed_hashgrid) {
-		throw std::runtime_error{"RoutedHashGrid: BaseConvert hash is not supported."};
+	const bool two_choice_hashgrid = equals_case_insensitive(encoding_type, "TwoChoiceHashGrid");
+	if (routed_hashgrid || two_choice_hashgrid) {
+		throw std::runtime_error{"RoutedHashGrid and TwoChoiceHashGrid: BaseConvert hash is not supported."};
 	}
 	std::vector<uint32_t> level_salts = encoding.value("level_salts", std::vector<uint32_t>(n_levels, 0u));
+	std::vector<uint32_t> two_choice_salts = encoding.value("two_choice_salts", std::vector<uint32_t>(2 * n_levels, 0u));
+	std::vector<uint32_t> two_choice_loads = encoding.value("two_choice_loads", std::vector<uint32_t>{});
 
 #define TCNN_GRID_PARAMS \
 	n_features, \
@@ -1878,7 +2028,10 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	grid_type, \
 	fixed_point_pos, \
 	routed_hashgrid, \
-	level_salts,
+	level_salts, \
+	two_choice_hashgrid, \
+	two_choice_salts, \
+	two_choice_loads,
 
 	// If higher-dimensional hash encodings are desired, corresponding switch cases can be added
 	switch (n_dims_to_encode) {
