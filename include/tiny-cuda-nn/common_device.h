@@ -883,6 +883,63 @@ __device__ uint32_t grid_index(const GridType grid_type, const uint32_t hashmap_
 	return index % hashmap_size;
 }
 
+__host__ __device__ inline uint32_t mix_hash_salt(uint32_t hash, uint32_t salt) {
+	hash ^= salt + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+	hash ^= hash >> 16;
+	hash *= 0x7feb352du;
+	hash ^= hash >> 15;
+	hash *= 0x846ca68bu;
+	hash ^= hash >> 16;
+	return hash;
+}
+
+template <uint32_t N_DIMS, HashType HASH_TYPE>
+__device__ uint32_t routed_grid_index(
+	const GridType grid_type,
+	const uint32_t hashmap_size,
+	const uint32_t grid_resolution,
+	const uvec<N_DIMS>& pos_grid,
+	const uint32_t salt
+) {
+	if (salt == 0 || grid_type != GridType::Hash) {
+		return grid_index<N_DIMS, HASH_TYPE>(grid_type, hashmap_size, grid_resolution, pos_grid);
+	}
+
+	uint32_t stride = 1;
+	uint32_t index = 0;
+
+	constexpr uint32_t MAX_BASES[] = {
+		0x0,
+		0xFFFFFFFF,
+		0xFFFF,
+		0x659,
+		0xFF,
+		0x54,
+		0x28,
+		0x17,
+		0xF,
+		0xB,
+		0x9,
+	};
+	static_assert(N_DIMS <= sizeof(MAX_BASES), "routed_grid_index can only be used for N_DIMS <= 10");
+
+	if (grid_resolution <= MAX_BASES[N_DIMS]) {
+		TCNN_PRAGMA_UNROLL
+		for (uint32_t dim = 0; dim < N_DIMS; ++dim) {
+			index += pos_grid[dim] * stride;
+			stride *= grid_resolution;
+		}
+	} else {
+		stride = 0xFFFFFFFF;
+	}
+
+	if (hashmap_size < stride) {
+		index = mix_hash_salt(grid_hash<N_DIMS, HASH_TYPE>(pos_grid), salt);
+	}
+
+	return index % hashmap_size;
+}
+
 __host__ __device__ inline float grid_scale(uint32_t level, float log2_per_level_scale, uint32_t base_resolution) {
 	// The -1 means that `base_resolution` refers to the number of grid _vertices_ rather
 	// than the number of cells. This is slightly different from the notation in the paper,

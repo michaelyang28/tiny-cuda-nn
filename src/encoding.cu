@@ -72,6 +72,7 @@ auto register_builtin_encodings() {
 	};
 	register_encoding<T>(factories, "Grid", grid_factory);
 	register_encoding<T>(factories, "HashGrid", grid_factory);
+	register_encoding<T>(factories, "RoutedHashGrid", grid_factory);
 	register_encoding<T>(factories, "TiledGrid", grid_factory);
 	register_encoding<T>(factories, "DenseGrid", grid_factory);
 	register_encoding<T>(factories, "AdaptiveHashGrid", [](uint32_t n_dims_to_encode, const json& encoding) {

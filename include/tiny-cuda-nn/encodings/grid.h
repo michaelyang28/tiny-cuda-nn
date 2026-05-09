@@ -45,6 +45,15 @@
 
 namespace tcnn {
 
+class RoutedHashGridEncodingBase {
+public:
+	virtual ~RoutedHashGridEncodingBase() = default;
+	virtual bool routed_hashgrid() const = 0;
+	virtual std::vector<uint32_t> routed_level_salts() const = 0;
+	virtual const uint32_t* routed_level_salts_gpu() const = 0;
+	virtual void set_routed_level_salts(const std::vector<uint32_t>& salts) = 0;
+};
+
 template <typename T, uint32_t N_POS_DIMS, uint32_t N_FEATURES_PER_LEVEL, HashType HASH_TYPE>
 __global__ void kernel_grid(
 	const uint32_t num_elements,
@@ -56,6 +65,7 @@ __global__ void kernel_grid(
 	const float* __restrict__ max_level_gpu,
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
+	const uint32_t* __restrict__ level_salts,
 	const T* __restrict__ grid,
 	MatrixView<const float> positions_in,
 	T* __restrict__ encoded_positions,
@@ -93,6 +103,7 @@ __global__ void kernel_grid(
 
 	grid += offset_table.data[level] * N_FEATURES_PER_LEVEL;
 	const uint32_t hashmap_size = offset_table.data[level + 1] - offset_table.data[level];
+	const uint32_t level_salt = level_salts ? level_salts[level] : 0u;
 
 	const float scale = grid_scale(level, log2_per_level_scale, base_resolution);
 	const uint32_t resolution = grid_resolution(scale);
@@ -114,7 +125,7 @@ __global__ void kernel_grid(
 	}
 
 	auto grid_val = [&](const uvec<N_POS_DIMS>& local_pos) {
-		const uint32_t index = grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos) * N_FEATURES_PER_LEVEL;
+		const uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL;
 		return *(tvec<T, N_FEATURES_PER_LEVEL, PARAMS_ALIGNED ? sizeof(T) * N_FEATURES_PER_LEVEL : sizeof(T)>*)&grid[index];
 	};
 
@@ -223,6 +234,7 @@ __global__ void kernel_grid_backward(
 	const bool stochastic_interpolation,
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
+	const uint32_t* __restrict__ level_salts,
 	GRAD_T* __restrict__ grid_gradient,
 	MatrixView<const float> positions_in,
 	const T* __restrict__ dL_dy
@@ -245,12 +257,13 @@ __global__ void kernel_grid_backward(
 
 	grid_gradient += offset_table.data[level] * N_FEATURES_PER_LEVEL;
 	const uint32_t hashmap_size = offset_table.data[level + 1] - offset_table.data[level];
+	const uint32_t level_salt = level_salts ? level_salts[level] : 0u;
 
 	const float scale = grid_scale(level, log2_per_level_scale, base_resolution);
 	const uint32_t resolution = grid_resolution(scale);
 
 	auto add_grid_gradient = [&](const uvec<N_POS_DIMS>& local_pos, const tvec<GRAD_T, N_FEATURES_PER_THREAD>& grad, const float weight) {
-		uint32_t index = grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos) * N_FEATURES_PER_LEVEL + feature;
+		uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		atomic_add_gmem(grid_gradient + index, (GRAD_T)weight * grad);
 	};
 
@@ -360,6 +373,7 @@ __global__ void kernel_grid_backward_input_backward_grid(
 	// const bool stochastic_interpolation, // TODO: is this needed?
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
+	const uint32_t* __restrict__ level_salts,
 	// inputs
 	MatrixView<const float> dL_ddLdx,
 	MatrixView<const float> positions_in,
@@ -385,12 +399,13 @@ __global__ void kernel_grid_backward_input_backward_grid(
 
 	grid_gradient += offset_table.data[level] * N_FEATURES_PER_LEVEL;
 	const uint32_t hashmap_size = offset_table.data[level + 1] - offset_table.data[level];
+	const uint32_t level_salt = level_salts ? level_salts[level] : 0u;
 
 	const float scale = grid_scale(level, log2_per_level_scale, base_resolution);
 	const uint32_t resolution = grid_resolution(scale);
 
 	auto add_grid_gradient = [&](const uvec<N_POS_DIMS>& local_pos, const tvec<GRAD_T, N_FEATURES_PER_THREAD>& grad, const float weight) {
-		const uint32_t index = grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos) * N_FEATURES_PER_LEVEL + feature;
+		const uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		atomic_add_gmem(grid_gradient + index, (GRAD_T)weight * grad);
 	};
 
@@ -465,6 +480,7 @@ __global__ void kernel_grid_backward_input_backward_input(
 	const float* __restrict__ max_level_gpu,
 	const InterpolationType interpolation_type,
 	const GridType grid_type,
+	const uint32_t* __restrict__ level_salts,
 	// inputs
 	MatrixView<const float> dL_ddLdx,
 	MatrixView<const float> positions_in,
@@ -491,6 +507,7 @@ __global__ void kernel_grid_backward_input_backward_input(
 
 	grid += offset_table.data[level] * N_FEATURES_PER_LEVEL;
 	const uint32_t hashmap_size = offset_table.data[level + 1] - offset_table.data[level];
+	const uint32_t level_salt = level_salts ? level_salts[level] : 0u;
 
 	const float scale = grid_scale(level, log2_per_level_scale, base_resolution);
 	const uint32_t resolution = grid_resolution(scale);
@@ -527,7 +544,7 @@ __global__ void kernel_grid_backward_input_backward_input(
 	// for N-linear interpolation
 
 	auto calc_dLdx = [&](const uvec<N_POS_DIMS>& local_pos, const float weight) {
-		const uint32_t index = grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos) * N_FEATURES_PER_LEVEL + feature;
+		const uint32_t index = routed_grid_index<N_POS_DIMS, HASH_TYPE>(grid_type, hashmap_size, resolution, local_pos, level_salt) * N_FEATURES_PER_LEVEL + feature;
 		float dL_dx_dim = 0;
 
 		TCNN_PRAGMA_UNROLL
@@ -655,7 +672,7 @@ __global__ void kernel_grid_backward_input_backward_dLdoutput(
 }
 
 template <typename T, uint32_t N_POS_DIMS=3, uint32_t N_FEATURES_PER_LEVEL=2, HashType HASH_TYPE=HashType::CoherentPrime>
-class GridEncodingTemplated : public MultiLevelEncoding<T> {
+class GridEncodingTemplated : public MultiLevelEncoding<T>, public RoutedHashGridEncodingBase {
 public:
 #if TCNN_MIN_GPU_ARCH >= 62 || TCNN_MIN_GPU_ARCH == 60
 	// The GPUs that we tested this on do not have an efficient 1D fp16
@@ -678,7 +695,9 @@ public:
 		bool stochastic_interpolation,
 		InterpolationType interpolation_type,
 		GridType grid_type,
-		bool fixed_point_pos
+		bool fixed_point_pos,
+		bool routed_hashgrid = false,
+		const std::vector<uint32_t>& level_salts = {}
 	) :
 	m_n_features{n_features},
 	m_log2_hashmap_size{log2_hashmap_size},
@@ -687,8 +706,13 @@ public:
 	m_stochastic_interpolation{stochastic_interpolation},
 	m_interpolation_type{interpolation_type},
 	m_grid_type{grid_type},
-	m_fixed_point_pos{fixed_point_pos}
+	m_fixed_point_pos{fixed_point_pos},
+	m_routed_hashgrid{routed_hashgrid}
 	{
+		if (m_routed_hashgrid && grid_type != GridType::Hash) {
+			throw std::runtime_error{"RoutedHashGrid: only Hash grid type is supported."};
+		}
+
 		m_n_levels = div_round_up(m_n_features, N_FEATURES_PER_LEVEL);
 		uint32_t offset = 0;
 
@@ -733,6 +757,11 @@ public:
 
 		if (n_features % N_FEATURES_PER_LEVEL != 0) {
 			throw std::runtime_error{fmt::format("GridEncoding: n_features={} must be a multiple of N_FEATURES_PER_LEVEL={}", n_features, N_FEATURES_PER_LEVEL)};
+		}
+
+		if (m_routed_hashgrid) {
+			std::vector<uint32_t> initial_salts = level_salts.empty() ? std::vector<uint32_t>(m_n_levels, 0u) : level_salts;
+			set_routed_level_salts(initial_salts);
 		}
 	}
 
@@ -794,6 +823,7 @@ public:
 			this->m_max_level_gpu,
 			m_interpolation_type,
 			m_grid_type,
+			m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
 			use_inference_params ? this->inference_params() : this->params(),
 			forward->positions.data() ? forward->positions.view() : input.view(),
 			encoded_positions_soa,
@@ -882,6 +912,7 @@ public:
 				m_stochastic_interpolation,
 				m_interpolation_type,
 				m_grid_type,
+				m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
 				grid_gradient,
 				forward.positions.data() ? forward.positions.view() : input.view(), // positions SoA
 				dL_dy_rm // gradients SoA
@@ -976,6 +1007,7 @@ public:
 				this->m_max_level_gpu,
 				m_interpolation_type,
 				m_grid_type,
+				m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
 				// inputs
 				dL_ddLdinput.view(),
 				forward.positions.data() ? forward.positions.view() : input.view(), // positions SoA
@@ -1030,6 +1062,7 @@ public:
 				this->m_max_level_gpu,
 				m_interpolation_type,
 				m_grid_type,
+				m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr,
 				// inputs
 				dL_ddLdinput.view(),
 				forward.positions.data() ? forward.positions.view() : input.view(),
@@ -1112,9 +1145,33 @@ public:
 		return N_FEATURES_PER_LEVEL;
 	}
 
+	bool routed_hashgrid() const override {
+		return m_routed_hashgrid;
+	}
+
+	std::vector<uint32_t> routed_level_salts() const override {
+		return m_level_salts;
+	}
+
+	const uint32_t* routed_level_salts_gpu() const override {
+		return m_routed_hashgrid ? m_level_salts_gpu.data() : nullptr;
+	}
+
+	void set_routed_level_salts(const std::vector<uint32_t>& salts) override {
+		if (!m_routed_hashgrid) {
+			throw std::runtime_error{"GridEncoding: level salts can only be set on RoutedHashGrid."};
+		}
+		if (salts.size() != m_n_levels) {
+			throw std::runtime_error{fmt::format("RoutedHashGrid: expected {} level salts, got {}.", m_n_levels, salts.size())};
+		}
+
+		m_level_salts = salts;
+		m_level_salts_gpu.resize_and_copy_from_host(m_level_salts);
+	}
+
 	json hyperparams() const override {
 		json result = {
-			{"otype", "Grid"},
+			{"otype", m_routed_hashgrid ? "RoutedHashGrid" : "Grid"},
 			{"type", to_string(m_grid_type)},
 			{"n_levels", m_n_levels},
 			{"n_features_per_level", N_FEATURES_PER_LEVEL},
@@ -1126,6 +1183,9 @@ public:
 
 		if (m_grid_type == GridType::Hash) {
 			result["log2_hashmap_size"] = m_log2_hashmap_size;
+		}
+		if (m_routed_hashgrid) {
+			result["level_salts"] = m_level_salts;
 		}
 
 		return result;
@@ -1720,6 +1780,9 @@ private:
 	InterpolationType m_interpolation_type;
 	GridType m_grid_type;
 	bool m_fixed_point_pos;
+	bool m_routed_hashgrid = false;
+	std::vector<uint32_t> m_level_salts;
+	GPUMemory<uint32_t> m_level_salts_gpu;
 };
 
 template <typename T, uint32_t N_FEATURES_PER_LEVEL, HashType HASH_TYPE>
@@ -1743,6 +1806,14 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	const GridType grid_type = string_to_grid_type(encoding.value("type", default_type));
 	const uint32_t base_resolution = encoding.value("base_resolution", 16u);
 	const bool fixed_point_pos = encoding.value("fixed_point_pos", false);
+	const bool routed_hashgrid = equals_case_insensitive(encoding_type, "RoutedHashGrid");
+	if (routed_hashgrid && grid_type != GridType::Hash) {
+		throw std::runtime_error{"RoutedHashGrid: only Hash grid type is supported."};
+	}
+	std::vector<uint32_t> level_salts = encoding.value("level_salts", std::vector<uint32_t>(n_levels, 0u));
+	if (routed_hashgrid && level_salts.size() != n_levels) {
+		throw std::runtime_error{fmt::format("RoutedHashGrid: expected {} level salts, got {}.", n_levels, level_salts.size())};
+	}
 
 #define TCNN_GRID_PARAMS \
 	n_features, \
@@ -1752,7 +1823,9 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	encoding.value("stochastic_interpolation", false), \
 	string_to_interpolation_type(encoding.value("interpolation", "Linear")), \
 	grid_type, \
-	fixed_point_pos,
+	fixed_point_pos, \
+	routed_hashgrid, \
+	level_salts,
 
 	// If higher-dimensional hash encodings are desired, corresponding switch cases can be added
 	switch (n_dims_to_encode) {
@@ -1789,6 +1862,11 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	const GridType grid_type = string_to_grid_type(encoding.value("type", default_type));
 	const uint32_t base_resolution = encoding.value("base_resolution", 16u);
 	const bool fixed_point_pos = encoding.value("fixed_point_pos", false);
+	const bool routed_hashgrid = equals_case_insensitive(encoding_type, "RoutedHashGrid");
+	if (routed_hashgrid) {
+		throw std::runtime_error{"RoutedHashGrid: BaseConvert hash is not supported."};
+	}
+	std::vector<uint32_t> level_salts = encoding.value("level_salts", std::vector<uint32_t>(n_levels, 0u));
 
 #define TCNN_GRID_PARAMS \
 	n_features, \
@@ -1798,7 +1876,9 @@ create_grid_encoding_templated_2(uint32_t n_dims_to_encode, const json& encoding
 	encoding.value("stochastic_interpolation", false), \
 	string_to_interpolation_type(encoding.value("interpolation", "Linear")), \
 	grid_type, \
-	fixed_point_pos,
+	fixed_point_pos, \
+	routed_hashgrid, \
+	level_salts,
 
 	// If higher-dimensional hash encodings are desired, corresponding switch cases can be added
 	switch (n_dims_to_encode) {
